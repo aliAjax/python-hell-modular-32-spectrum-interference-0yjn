@@ -49,6 +49,22 @@ def parse_timestamp(payload, name):
     return value
 
 
+def normalize_expected_stations(payload):
+    value = payload.get("expected_stations")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise DomainError("invalid_expected_stations", "expected_stations 必须是监测站号数组")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise DomainError("invalid_expected_stations", "expected_stations 中的站号不能为空")
+        station = item.strip()
+        if station not in result:
+            result.append(station)
+    return result
+
+
 def normalize_create(payload):
     frequency = number(payload, "frequency_mhz", 0.001, 300000)
     bandwidth = number(payload, "bandwidth_mhz", 0.001)
@@ -57,6 +73,7 @@ def normalize_create(payload):
     strength = number(payload, "strength_dbm")
     detected_at = parse_timestamp(payload, "detected_at")
     reporter = require_text(payload, "reporter")
+    expected_stations = normalize_expected_stations(payload)
     stable_key = "%s|%s|%s|%s" % (station_id, region, frequency, detected_at)
     return {
         "frequency_mhz": frequency,
@@ -68,6 +85,7 @@ def normalize_create(payload):
         "reporter": reporter,
         "measurement_revisions": [],
         "suspend_authorization": None,
+        "expected_stations": expected_stations,
         "_stable_key": stable_key,
     }
 
@@ -80,12 +98,21 @@ def normalize_source(payload):
     region = payload.get("region")
     if region is not None:
         region = str(region).strip() or None
+    frequency = payload.get("frequency_mhz")
+    if frequency is not None and not isinstance(frequency, bool):
+        try:
+            frequency = float(frequency)
+        except (TypeError, ValueError):
+            raise DomainError("invalid_number", "frequency_mhz 必须是数字")
+    station_id = payload.get("station_id")
+    if station_id is not None:
+        station_id = str(station_id).strip() or None
     return {
         "source_type": source_type,
         "external_id": external_id,
         "observed_at": observed_at,
         "strength_dbm": strength,
         "region": region,
-        "station_id": payload.get("station_id"),
-        "frequency_mhz": payload.get("frequency_mhz"),
+        "station_id": station_id,
+        "frequency_mhz": frequency,
     }

@@ -48,7 +48,7 @@ def _text(payload, name):
     return value.strip()
 
 
-def apply_action(item, action, payload, actor, role):
+def apply_action(item, action, payload, actor, role, evidence=None):
     status = item["status"]
     current = dict(item["payload"])
 
@@ -89,7 +89,9 @@ def apply_action(item, action, payload, actor, role):
         if not authorization.startswith("REG-"):
             raise DomainError("invalid_authorization", "停用授权编号无效", 403)
         current["suspend_authorization"] = authorization
-        return "suspended", current, {"authorization_code": authorization}
+        # 共识依据随授权固化：已经签发的停用授权不能被后续归并改写
+        current["consensus_evidence"] = evidence
+        return "suspended", current, {"authorization_code": authorization, "consensus_evidence": evidence}
 
     if action == "coordinate":
         _need_status(item, {"suspended"})

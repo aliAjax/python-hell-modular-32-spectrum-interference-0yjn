@@ -160,7 +160,19 @@ class Repository:
         finally:
             conn.close()
 
-    def add_source(self, item_id, source_type, external_id, payload, observed_at, actor, role):
+    def _correlation_inputs(self, conn, item_id):
+        row = conn.execute("SELECT payload FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("item_not_found", "业务实体不存在")
+        item_payload = json.loads(row["payload"])
+        rows = conn.execute("SELECT id,observed_at,payload FROM sources WHERE item_id=? ORDER BY id", (item_id,)).fetchall()
+        sources = [
+            {"id": source_row["id"], "observed_at": source_row["observed_at"], "payload": json.loads(source_row["payload"])}
+            for source_row in rows
+        ]
+        return item_payload, sources
+
+    def add_source(self, item_id, source_type, external_id, payload, observed_at, actor, role, on_recorded=None):
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -183,8 +195,15 @@ class Repository:
                 role,
                 {"source_id": source_id, "source_type": source_type, "external_id": external_id},
             )
+            extra = None
+            if on_recorded is not None:
+                # 在同一事务/同一连接内重算时频关联，保证关联变化审计与来源入库原子一致
+                extra = on_recorded(conn, source_id)
             conn.execute("COMMIT")
-            return {"id": source_id, "item_id": item_id, "source_type": source_type, "external_id": external_id, "payload": payload, "observed_at": observed_at}
+            result = {"id": source_id, "item_id": item_id, "source_type": source_type, "external_id": external_id, "payload": payload, "observed_at": observed_at}
+            if extra is not None:
+                result.update(extra)
+            return result
         except Exception:
             try:
                 conn.execute("ROLLBACK")
