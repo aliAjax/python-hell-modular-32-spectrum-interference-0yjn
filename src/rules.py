@@ -1,5 +1,6 @@
 import math
 
+from . import correlation
 from .domain import DomainError
 
 ENTITY_TYPE = "spectrum_interference"
@@ -18,6 +19,8 @@ ACTION_ROLES = {
 ENFORCE_REGION = True
 REGION_SENSITIVE_ACTIONS = {"suspend", "coordinate", "resolve", "cancel"}
 ACTION_REQUIRES_VERSION = {"suspend", "coordinate", "resolve", "cancel"}
+# 停用前必须用来源重新核对时频共识
+ACTION_NEEDS_SOURCES = {"suspend"}
 
 
 def assess(payload):
@@ -48,7 +51,7 @@ def _text(payload, name):
     return value.strip()
 
 
-def apply_action(item, action, payload, actor, role):
+def apply_action(item, action, payload, actor, role, sources=None):
     status = item["status"]
     current = dict(item["payload"])
 
@@ -88,8 +91,38 @@ def apply_action(item, action, payload, actor, role):
         authorization = _text(payload, "authorization_code")
         if not authorization.startswith("REG-"):
             raise DomainError("invalid_authorization", "停用授权编号无效", 403)
+        # 已经签发的停用授权不能被改写：重复提交同一编号幂等返回，换编号直接拒绝
+        existing = current.get("suspend_authorization")
+        if existing:
+            if existing != authorization:
+                raise DomainError(
+                    "authorization_immutable",
+                    "停用授权 %s 已经签发，不能被改写" % existing,
+                    409,
+                )
+            return status, current, {"authorization_code": authorization, "idempotent": True}
+        # 至少三个不同监测站在同一联合证据组内形成共识
+        digest = correlation.correlate(current, sources or [])
+        primary = correlation.primary_group(digest)
+        if not primary or not primary["consensus"]:
+            gap = correlation.consensus_gap(digest, payload.get("expected_stations"))
+            present = "、".join(gap["present"]) or "无"
+            message = (
+                "联合证据不足：同一时频关联组现有 %d 个监测站（%s），至少需要 %d 站共识"
+                % (digest["consensus"]["station_count"], present, gap["required"])
+            )
+            if gap["missing_stations"]:
+                message += "；仍缺站：%s" % "、".join(gap["missing_stations"])
+            else:
+                message += "；仍缺 %d 个不同监测站的上报" % gap["shortage"]
+            raise DomainError("insufficient_consensus", message, 409)
         current["suspend_authorization"] = authorization
-        return "suspended", current, {"authorization_code": authorization}
+        current["correlation"] = digest
+        return "suspended", current, {
+            "authorization_code": authorization,
+            "consensus": digest["consensus"],
+            "evidence_summary": correlation.group_summary(primary),
+        }
 
     if action == "coordinate":
         _need_status(item, {"suspended"})

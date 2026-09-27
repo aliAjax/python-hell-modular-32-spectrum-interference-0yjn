@@ -80,12 +80,20 @@ def normalize_source(payload):
     region = payload.get("region")
     if region is not None:
         region = str(region).strip() or None
+    station_id = payload.get("station_id")
+    if station_id is not None:
+        station_id = str(station_id).strip() or None
+    frequency_mhz = payload.get("frequency_mhz")
+    if frequency_mhz is not None and not isinstance(frequency_mhz, bool):
+        frequency_mhz = number(payload, "frequency_mhz", 0.001, 300000)
+    elif frequency_mhz is not None:
+        raise DomainError("invalid_number", "frequency_mhz 必须是数字")
     return {
         "source_type": source_type,
         "external_id": external_id,
         "observed_at": observed_at,
         "strength_dbm": strength,
         "region": region,
-        "station_id": payload.get("station_id"),
-        "frequency_mhz": payload.get("frequency_mhz"),
+        "station_id": station_id,
+        "frequency_mhz": frequency_mhz,
     }

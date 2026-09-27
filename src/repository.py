@@ -160,13 +160,28 @@ class Repository:
         finally:
             conn.close()
 
-    def add_source(self, item_id, source_type, external_id, payload, observed_at, actor, role):
+    def _row_to_source(self, row):
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        return value
+
+    def list_sources(self, item_id):
+        conn = self.connect()
+        try:
+            rows = conn.execute("SELECT * FROM sources WHERE item_id=? ORDER BY id DESC", (item_id,)).fetchall()
+            return [self._row_to_source(row) for row in rows]
+        finally:
+            conn.close()
+
+    def add_source(self, item_id, source_type, external_id, payload, observed_at, actor, role, correlator=None):
         conn = self.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            item = conn.execute("SELECT id FROM items WHERE id=?", (item_id,)).fetchone()
-            if item is None:
+            row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
                 raise NotFoundError("item_not_found", "业务实体不存在")
+            before_rows = conn.execute("SELECT * FROM sources WHERE item_id=? ORDER BY id", (item_id,)).fetchall()
+            sources_before = [self._row_to_source(one) for one in before_rows]
             try:
                 conn.execute(
                     "INSERT INTO sources(item_id,source_type,external_id,payload,observed_at,created_at) VALUES(?,?,?,?,?,?)",
@@ -183,27 +198,35 @@ class Repository:
                 role,
                 {"source_id": source_id, "source_type": source_type, "external_id": external_id},
             )
+            new_payload = None
+            if correlator is not None:
+                after_rows = conn.execute("SELECT * FROM sources WHERE item_id=? ORDER BY id", (item_id,)).fetchall()
+                sources_after = [self._row_to_source(one) for one in after_rows]
+                item_payload = json.loads(row["payload"])
+                new_source = {"id": source_id, "source_type": source_type, "external_id": external_id}
+                new_payload, correlation_event = correlator(
+                    item_payload, sources_before, sources_after, new_source
+                )
+                # 归并只能更新关联摘要，已经签发的停用授权绝不允许被改写
+                if item_payload.get("suspend_authorization") is not None:
+                    new_payload["suspend_authorization"] = item_payload["suspend_authorization"]
+                version = int(row["version"]) + 1
+                conn.execute(
+                    "UPDATE items SET payload=?,version=?,updated_at=? WHERE id=?",
+                    (canonical_json(new_payload), version, now_iso(), item_id),
+                )
+                self.append_audit(
+                    conn, item_id, "correlation_updated", actor, role, correlation_event
+                )
             conn.execute("COMMIT")
-            return {"id": source_id, "item_id": item_id, "source_type": source_type, "external_id": external_id, "payload": payload, "observed_at": observed_at}
+            stored_payload = new_payload if new_payload is not None else json.loads(row["payload"])
+            return {"id": source_id, "item_id": item_id, "source_type": source_type, "external_id": external_id, "payload": payload, "observed_at": observed_at, "item_payload": stored_payload}
         except Exception:
             try:
                 conn.execute("ROLLBACK")
             except sqlite3.Error:
                 pass
             raise
-        finally:
-            conn.close()
-
-    def list_sources(self, item_id):
-        conn = self.connect()
-        try:
-            rows = conn.execute("SELECT * FROM sources WHERE item_id=? ORDER BY id DESC", (item_id,)).fetchall()
-            result = []
-            for row in rows:
-                value = dict(row)
-                value["payload"] = json.loads(value["payload"])
-                result.append(value)
-            return result
         finally:
             conn.close()
 
